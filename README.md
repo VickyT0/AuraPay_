@@ -1,44 +1,49 @@
 # AuraPay
 
-**AuraPay** is an academic demonstration prototype of a cloud-based mobile payment application.  
-It was developed to support a Master's thesis focused on the design, implementation, security, and testing of a modern payment platform.
+**AuraPay** is an academic demonstration prototype of a cloud-based mobile payment application developed in support of a Master's thesis on the design, implementation, security, and testing of a modern payment platform.
 
-The prototype models selected **account-to-account (A2A)** and open-banking-like processes using **synthetic data and simulated internal services**. Its purpose is to demonstrate how functional, security, privacy, resilience, and regulatory-derived requirements can be translated into software components, controls, and repeatable tests.
+The prototype models selected **account-to-account (A2A)**, consent, recipient-verification, QR-ready payment-request, risk, audit, authentication, and session-security processes using **synthetic data and simulated internal services**.
 
-> **Scope notice:** AuraPay is not a bank, payment institution, electronic-money institution, PISP, AISP, card wallet, or production payment service. It does not hold real customer funds, execute real bank transfers, perform settlement, or process real card data.
+> **Scope notice:** AuraPay is not a bank, payment institution, electronic-money institution, PISP, AISP, card wallet, or production payment service. It does not hold real customer funds, execute real bank transfers, perform settlement, process real card data, or connect to production banking infrastructure.
+
+**Snapshot reviewed:** 20 September 2026
 
 ---
 
 ## 1. Current prototype scope
 
-The current codebase implements:
+The current root application implements:
 
-- user registration and password authentication;
-- Laravel Fortify session-based authentication;
-- Passkey/WebAuthn support and passkey registration;
+- user registration and password authentication through Laravel Fortify;
+- Passkey / WebAuthn registration and login support;
+- database-backed authenticated sessions;
+- a custom **5-minute idle-session timeout** for protected browser and API routes;
 - one test wallet per registered user;
 - simulated wallet top-up;
-- transaction history;
-- consent creation, listing, and revocation API;
-- `payment_initiation` consent enforcement;
+- account-information and transaction-history retrieval;
+- consent creation, listing, expiry, replacement, and revocation;
+- enforcement of `account_info` consent for wallet and transaction-information endpoints;
+- enforcement of `payment_initiation` consent for A2A and QR payment operations;
 - simulated A2A transfers between AuraPay test wallets;
 - Verification of Payee (VoP) simulation;
-- idempotency protection for A2A payments;
-- signed payment requests intended for QR-based payment flows;
-- payment-request expiration checks;
+- an encrypted, short-lived payment-confirmation token that binds the authenticated user, receiver, amount, and expiry time;
+- mandatory `Idempotency-Key` protection for A2A payments;
+- mandatory A2A `X-Correlation-ID` validation for end-to-end traceability;
+- signed QR-ready payment requests using HMAC-SHA256;
+- payment-request expiry and one-time status checks;
 - rule-based transaction risk scoring;
-- high-risk transaction flagging;
-- role-based administrative access to audit logs;
-- audit events for completed and flagged transactions;
+- high-risk transaction flagging without executing the wallet transfer;
+- role-based administrative read access to audit logs;
+- persistent audit evidence for insufficient-funds A2A failures;
 - database notifications for completed and flagged transactions;
-- API request-format and payload-size validation;
+- API request-format, response-format, and payload-size validation;
 - API rate limiting;
-- server-side validation of payment inputs;
+- server-side payment validation;
 - wallet ownership checks;
-- transactional balance updates with database locking;
+- transactional balance updates with database row locking;
 - automated feature tests for selected security controls.
 
-All balances, users, recipients, transactions, and payment requests are demonstrational.
+All users, wallets, balances, recipients, payment requests, transactions, and funds are demonstrational.
 
 ---
 
@@ -48,127 +53,288 @@ All balances, users, recipients, transactions, and payment requests are demonstr
 |---|---|
 | Backend | PHP 8.3+, Laravel 13 |
 | Authentication | Laravel Fortify |
-| Passkeys | Laravel Passkeys / WebAuthn |
+| Passkeys | Fortify Passkeys / WebAuthn with `@laravel/passkeys` |
 | Frontend | Blade, JavaScript, Tailwind CSS |
 | Asset build | Vite |
-| Persistence | Eloquent ORM; SQLite for local/demo development |
+| Persistence | Eloquent ORM; SQLite for local/demo use |
+| Sessions | Database-backed Laravel sessions |
 | Testing | PHPUnit / Laravel test framework |
 | Package management | Composer, npm |
 
 ---
 
-## 3. Architecture
+## 3. Repository structure and source of truth
 
-The root Laravel application is the current implementation.
+The **root Laravel application** is the current implementation.
 
-> The archive also contains an `aurapay-complete/` directory representing an older prototype snapshot. The root `app/`, `routes/`, `resources/`, `database/`, and `tests/` directories should be treated as the source of truth for the current version.
+The archive also contains:
+
+```text
+aurapay-complete/
+```
+
+This directory is an older prototype snapshot and should **not** be treated as the source of truth for the current version.
+
+Use the root directories:
+
+```text
+app/
+bootstrap/
+config/
+database/
+resources/
+routes/
+tests/
+```
+
+for current functionality.
 
 ### Main components
 
-| Component | Implementation |
+| Component | Main implementation |
 |---|---|
 | Browser demo UI | `resources/views/aurapay/dashboard.blade.php` |
+| Login UI | `resources/views/auth/login.blade.php` |
 | Frontend API wiring | `resources/js/aurapay.js` |
-| Authentication | Laravel Fortify + Passkeys |
+| Authentication / Passkeys | Laravel Fortify, `FortifyServiceProvider`, `User` |
+| Session idle timeout | `IdleSessionTimeout` middleware |
 | API gateway controls | `ApiGatewayValidation` middleware |
 | API throttling | `api-gateway` rate limiter |
-| Wallet/account operations | `WalletController`, `WalletService` |
+| Wallet operations | `WalletController`, `WalletService` |
 | A2A payments | `TransactionController`, `TransactionService` |
+| Payment confirmation | `PaymentConfirmationService` |
 | Consent management | `ConsentController`, `ConsentService`, `EnsureConsent` |
 | Verification of Payee | `VopController`, `VopService` |
-| QR-style payment requests | `QrPaymentController`, `QrSignatureService` |
+| QR-ready payment requests | `QrPaymentController`, `QrSignatureService` |
 | Risk rules | `RiskScoringService` |
 | Audit trail | `AuditService`, `AuditLog` |
 | Notifications | `TransactionNotification` |
 | Administrator authorization | `EnsureAdmin` |
 | Persistence | Eloquent models + Laravel migrations |
 
-### Request flow
+---
+
+## 4. High-level request flow
 
 ```text
 Browser / Demo UI
         |
         v
-Laravel session authentication
+Fortify authentication
+        |
+        v
+Laravel database-backed session
+        |
+        v
+5-minute idle-session timeout
         |
         v
 API Gateway Validation
-(JSON / Accept / payload limit)
+(JSON / Accept / 50 KiB payload limit)
         |
         v
-Rate Limiter
+API Rate Limiter
         |
         v
 Authorization / Consent
         |
-        +-------------------------+
-        |                         |
-        v                         v
-Wallet / Consent             Payment Flow
-                                  |
-                    +-------------+-------------+
-                    |             |             |
-                    v             v             v
-                   VoP        Risk Rules    QR Signature
-                    |             |             |
-                    +-------------+-------------+
-                                  |
-                                  v
-                         Transaction Service
-                                  |
-                                  v
-                          Database Transaction
-                                  |
-                    +-------------+-------------+
-                    |                           |
-                    v                           v
-                Audit Log                 Notification
+        +------------------------------------+
+        |                                    |
+        v                                    v
+Account information                     Payment flow
+                                             |
+                              +--------------+--------------+
+                              |              |              |
+                              v              v              v
+                             VoP       Confirmation      Risk rules
+                              |           token              |
+                              +--------------+--------------+
+                                             |
+                                             v
+                                     TransactionService
+                                             |
+                                             v
+                                      DB transaction
+                                             |
+                              +--------------+--------------+
+                              |                             |
+                              v                             v
+                          Audit trail                  Notification
 ```
 
 ---
 
-## 4. Authentication and session security
+## 5. Authentication and Passkeys
 
-AuraPay uses the Laravel `web` guard and Fortify.
+AuraPay uses Laravel Fortify with the Laravel `web` guard.
 
-Configured authentication-related controls include:
+### Configured controls
 
 - password authentication;
-- login throttling: **5 attempts per minute** per email/IP key;
-- Passkey/WebAuthn support;
+- login throttling: **5 attempts per minute** per normalized email/IP key;
+- Passkey / WebAuthn support;
 - passkey throttling: **10 attempts per minute**;
-- two-factor authentication support in Fortify configuration;
-- database-backed sessions;
-- authenticated access to the dashboard and API routes.
+- Fortify two-factor authentication feature enabled in configuration;
+- database-backed authenticated sessions;
+- authenticated access to the dashboard and AuraPay API routes.
 
-Passkey configuration derives the relying-party ID and allowed origin from `APP_URL`.
-
-### Passkey note
-
-Passkey registration is wired to the dashboard through:
+The `User` model implements:
 
 ```text
-resources/js/aurapay.js
-resources/views/aurapay/dashboard.blade.php
+Laravel\Fortify\Contracts\PasskeyUser
 ```
 
-The JavaScript passkey login handler expects a login button with:
+and uses:
+
+```text
+Laravel\Fortify\PasskeyAuthenticatable
+```
+
+### Passkey browser wiring
+
+The current login page contains:
 
 ```html
 id="passkey-login"
 ```
 
-In the supplied snapshot, the visible **Login with Passkey** button in `resources/views/auth/login.blade.php` does not currently contain this ID. Therefore, passkey registration is present, but the custom login button requires this small markup correction before the complete browser-based passkey login flow can be considered wired end-to-end.
+and the dashboard contains the Passkey registration control used by:
+
+```text
+resources/js/aurapay.js
+```
+
+The frontend calls the Laravel Passkeys client for registration and login.
+
+### Codespaces / HTTPS requirement
+
+Passkey relying-party configuration derives its host and allowed origin from:
+
+```text
+APP_URL
+```
+
+When testing in GitHub Codespaces, `APP_URL` must match the actual HTTPS forwarded-port URL opened in the browser.
+
+Example:
+
+```env
+APP_URL=https://<your-codespace-host>.app.github.dev
+```
+
+The application contains Codespaces-specific URL handling that forces the configured GitHub development URL to HTTPS.
 
 ---
 
-## 5. API security controls
+## 6. Session security and 5-minute idle timeout
+
+AuraPay contains a custom:
+
+```text
+App\Http\Middleware\IdleSessionTimeout
+```
+
+middleware.
+
+It is registered as:
+
+```text
+idle.timeout
+```
+
+and applied to both:
+
+- the authenticated dashboard;
+- the protected AuraPay API route group.
+
+### Idle-timeout rule
+
+The middleware stores:
+
+```text
+aurapay_last_activity
+```
+
+in the authenticated session.
+
+The maximum inactivity period is:
+
+```text
+300 seconds = 5 minutes
+```
+
+The timeout condition is:
+
+```text
+idle time >= 300 seconds
+```
+
+When the threshold is reached, AuraPay:
+
+1. logs the user out;
+2. invalidates the current session;
+3. regenerates the CSRF token.
+
+### Browser behavior
+
+A timed-out browser request is redirected to:
+
+```text
+/login?reason=idle-timeout
+```
+
+The login page displays a message informing the user that the session expired after five minutes of inactivity.
+
+### API behavior
+
+A timed-out API request receives:
+
+```json
+{
+  "message": "Session expired after 5 minutes of inactivity.",
+  "code": "SESSION_IDLE_TIMEOUT"
+}
+```
+
+with:
+
+```text
+401 Unauthorized
+```
+
+### Important distinction
+
+Laravel's general session configuration still contains:
+
+```env
+SESSION_LIFETIME=120
+```
+
+The **5-minute AuraPay idle timeout is a separate, stricter application control** implemented by `IdleSessionTimeout`.
+
+The current session configuration also uses:
+
+- database session storage by default;
+- HTTP-only session cookies by default;
+- `SameSite=lax` by default;
+- JSON session serialization.
+
+For HTTPS deployments, configure the secure-cookie setting appropriately, for example:
+
+```env
+SESSION_SECURE_COOKIE=true
+```
+
+---
+
+## 7. API security controls
 
 All AuraPay API endpoints are grouped behind:
 
 ```text
 web
 auth
+idle.timeout
 api.gateway
 throttle:api-gateway
 ```
@@ -177,11 +343,11 @@ throttle:api-gateway
 
 `ApiGatewayValidation` enforces:
 
-- JSON request bodies for POST/PUT/PATCH operations;
-- `Accept: application/json`;
-- a maximum request payload of **50 KiB**.
+- JSON bodies for non-safe methods such as POST, PUT, and PATCH;
+- JSON response negotiation through the `Accept` header;
+- maximum request payload size of **50 KiB**.
 
-Possible responses include:
+Possible gateway responses include:
 
 ```text
 406 Not Acceptable
@@ -189,15 +355,18 @@ Possible responses include:
 415 Unsupported Media Type
 ```
 
-### Rate limiting
+### API rate limiting
 
-The API gateway limiter allows:
+The named `api-gateway` limiter allows:
 
 ```text
 60 requests per minute
 ```
 
-The key is based on the authenticated user ID, or the IP address for an unauthenticated request.
+The limiter key uses:
+
+- authenticated user ID when available;
+- IP address otherwise.
 
 Requests above the limit return:
 
@@ -207,12 +376,13 @@ Requests above the limit return:
 
 ---
 
-## 6. Authorization
+## 8. Authorization and least privilege
 
 ### Wallet ownership
 
-A user cannot read or top up another user's wallet.  
-`WalletController` explicitly verifies that:
+A user cannot read or top up another user's wallet.
+
+`WalletController` verifies:
 
 ```text
 wallet.user_id == authenticated_user.id
@@ -224,17 +394,33 @@ Unauthorized access returns:
 403 Forbidden
 ```
 
-### Administrative access
+### Administrator authorization
 
-`/api/admin/audit-logs` is protected by the `admin` middleware.
-
-Only users with:
+The endpoint:
 
 ```text
-role = admin
+GET /api/admin/audit-logs
 ```
 
-can access the endpoint.
+is protected by:
+
+```text
+admin
+```
+
+middleware.
+
+Only a user whose database role is:
+
+```text
+admin
+```
+
+is allowed to read the audit-log endpoint.
+
+### Role mass-assignment protection
+
+The `role` field is intentionally not included in the user's mass-assignable registration fields.
 
 ### Consent ownership
 
@@ -242,9 +428,9 @@ A consent can only be revoked by the user who owns it.
 
 ---
 
-## 7. Consent management
+## 9. Consent management
 
-AuraPay supports the following consent scopes:
+AuraPay supports two consent scopes:
 
 ```text
 account_info
@@ -253,75 +439,128 @@ payment_initiation
 
 The API supports:
 
-- listing consents;
+- listing the authenticated user's consents;
 - granting consent;
 - revoking consent;
-- optional consent expiration.
+- checking expiration.
 
-The current protected payment routes require an active:
+### Default lifetime
+
+If the caller does not provide `ttl_minutes`, the current implementation uses:
+
+```text
+43200 minutes = 30 days
+```
+
+### One active consent per scope
+
+When a new consent is granted, existing live consents for the same user and scope are marked:
+
+```text
+revoked
+```
+
+before the new consent is created.
+
+### `account_info` enforcement
+
+The following routes require active:
+
+```text
+account_info
+```
+
+consent:
+
+```text
+GET /api/wallets/{wallet}
+GET /api/transactions
+```
+
+### `payment_initiation` enforcement
+
+The following routes require active:
 
 ```text
 payment_initiation
 ```
 
-consent.
+consent:
 
-A payment attempt without this consent returns:
+```text
+POST /api/transactions/a2a
+POST /api/qr
+POST /api/qr/{reference}/pay
+```
+
+Missing or expired required consent results in:
 
 ```text
 403 Forbidden
 ```
 
-### Current consent limitation
-
-`account_info` can be created, but the current wallet and transaction-information endpoints do not enforce it through `EnsureConsent`.
-
-Also, when `ttl_minutes` is omitted, the current controller passes `null` to `ConsentService`; consequently the created consent may have no expiration time. This should be aligned with the thesis requirement if mandatory consent expiry is required.
-
 ---
 
-## 8. Simulated A2A payments
+## 10. Simulated A2A payment flow
 
-The A2A endpoint models a transfer between two AuraPay test wallets.
+The A2A endpoint models a transfer between two internal AuraPay test wallets.
 
-Required input:
+### Payment payload
+
+The request body contains:
 
 ```json
 {
   "receiver_wallet_id": 2,
   "receiver_name": "Demo Receiver",
-  "amount": 25.00
+  "amount": 25.00,
+  "confirmation_token": "<server-issued-confirmation-token>"
 }
 ```
 
-The request must also contain:
+The request also requires:
 
 ```http
 Idempotency-Key: <client-generated-key>
+X-Correlation-ID: <UUID>
 ```
 
-The service verifies:
+### Server-side checks
 
-1. authenticated sender;
-2. active payment consent;
-3. request format and input data;
-4. sender wallet existence;
-5. receiver wallet existence;
-6. sender and receiver are different wallets;
-7. both wallets are active;
-8. exact Verification of Payee match;
-9. idempotency state;
-10. risk score;
-11. sufficient simulated balance;
-12. atomic balance transfer.
+The current A2A flow performs the following checks:
 
-Successful transactions return:
+1. authenticated user;
+2. five-minute idle-session state;
+3. active `payment_initiation` consent;
+4. JSON/API gateway validation;
+5. `Idempotency-Key` presence and maximum length;
+6. `X-Correlation-ID` presence and UUID format;
+7. receiver-wallet existence;
+8. receiver-name presence;
+9. amount precision and range;
+10. sender-wallet existence;
+11. prevention of self-transfer;
+12. active sender and receiver wallets;
+13. idempotent replay lookup;
+14. server-side exact VoP verification;
+15. encrypted confirmation-token verification;
+16. rule-based risk scoring;
+17. simulated balance availability;
+18. atomic wallet transfer.
+
+A normal successful transaction returns:
 
 ```text
 201 Created
 ```
 
-High-risk transactions are flagged and return:
+A high-risk transaction is held as:
+
+```text
+flagged
+```
+
+and returns:
 
 ```text
 202 Accepted
@@ -329,13 +568,13 @@ High-risk transactions are flagged and return:
 
 ---
 
-## 9. Verification of Payee (VoP)
+## 11. Verification of Payee (VoP)
 
-VoP is implemented as a deterministic prototype service.
+VoP is implemented as a deterministic academic prototype.
 
-The provided recipient name is normalized and compared with the name of the user who owns the receiver wallet.
+The provided receiver name is normalized and compared with the name of the user who owns the receiver wallet.
 
-Possible results:
+Possible statuses are:
 
 ```text
 match
@@ -344,50 +583,135 @@ no_match
 unavailable
 ```
 
-For A2A transfer execution, the current implementation requires:
+For actual A2A execution, the current backend requires:
 
 ```text
 match
 ```
 
-Any non-exact result stops the transfer with a validation response.
+Any non-exact result stops the transfer.
 
-This is a simulation of the recipient-verification step and is not connected to a production VoP service.
+This is a **local simulation** and is not connected to a production European VoP service.
 
 ---
 
-## 10. Idempotency and replay protection
+## 12. Dynamic payment confirmation
 
-Every A2A transfer requires an `Idempotency-Key`.
+After successful VoP, `VopController` creates a short-lived confirmation token through:
 
-The implementation provides two layers of protection:
+```text
+PaymentConfirmationService
+```
 
-1. application-level lookup by sender wallet + idempotency key;
-2. database unique constraint on:
+The token is encrypted using Laravel's `Crypt` service and binds:
+
+- authenticated user ID;
+- receiver wallet ID;
+- payment amount;
+- expiry timestamp.
+
+The token expires after:
+
+```text
+5 minutes
+```
+
+Before executing the A2A payment, the backend decrypts and verifies the token again.
+
+Changing the:
+
+- authenticated user;
+- receiver wallet;
+- amount;
+- or using the token after expiry
+
+causes confirmation validation to fail.
+
+This provides a prototype-level server-side confirmation artifact that binds the payment confirmation to the **specific amount and payee**.
+
+---
+
+## 13. Idempotency, transaction uniqueness, and replay protection
+
+Every A2A payment requires:
+
+```text
+Idempotency-Key
+```
+
+with a maximum length of:
+
+```text
+100 characters
+```
+
+The implementation uses two protection layers.
+
+### Application-level check
+
+AuraPay looks up the combination:
 
 ```text
 sender_wallet_id + idempotency_key
 ```
 
-If the same key is reused for the same receiver and amount, AuraPay returns the existing transaction and adds:
+before creating a new payment.
+
+If the same key is reused for the same receiver and amount, the existing transaction is returned instead of executing another transfer.
+
+The response includes:
 
 ```http
 X-Idempotent-Replay: true
 ```
 
-If the same key is reused for a different amount or receiver, the API returns:
+If the same key is reused for a different receiver or amount, AuraPay returns:
 
 ```text
 409 Conflict
 ```
 
-The maximum idempotency-key length is **100 characters**.
+### Database uniqueness
+
+The database migration also defines a unique constraint on:
+
+```text
+sender_wallet_id + idempotency_key
+```
+
+Transaction references are UUIDs with a database unique constraint.
+
+These controls protect the A2A prototype against accidental duplicate submission and repeated processing of the same logical payment.
 
 ---
 
-## 11. QR-style payment requests
+## 14. Correlation IDs and end-to-end traceability
 
-The prototype implements a signed payment-request flow intended to support QR-based interaction.
+A new A2A payment requires:
+
+```http
+X-Correlation-ID: <UUID>
+```
+
+The backend rejects:
+
+- a missing correlation ID;
+- a value that is not a valid UUID.
+
+The correlation ID is used for traceability and is:
+
+- returned in A2A responses;
+- stored in transaction metadata;
+- included in completed-transaction audit context;
+- included in persistent insufficient-funds failure audit context.
+
+This allows a client request, resulting transaction, response, and relevant audit evidence to be correlated during testing and analysis.
+
+---
+
+## 15. QR-ready signed payment requests
+
+The prototype implements a signed payment-request flow intended for QR-based interaction.
 
 A payment request contains:
 
@@ -396,10 +720,10 @@ A payment request contains:
 - optional fixed amount;
 - optional note;
 - status;
-- expiry time;
+- expiration time;
 - HMAC-SHA256 signature.
 
-The signature protects:
+The signature covers:
 
 ```text
 reference
@@ -408,7 +732,15 @@ amount
 expires_at
 ```
 
-Verification uses `hash_equals()` to avoid ordinary string-comparison timing differences.
+Verification uses:
+
+```text
+hash_equals()
+```
+
+for constant-time comparison of the expected and supplied signature values.
+
+### QR request behavior
 
 Invalid signatures return:
 
@@ -416,22 +748,39 @@ Invalid signatures return:
 403 Forbidden
 ```
 
-Expired payment requests return:
+Expired requests return:
 
 ```text
 410 Gone
 ```
 
-Used or inactive requests are rejected.
+A payment request whose status is no longer:
+
+```text
+pending
+```
+
+is rejected.
+
+After successful QR payment, the payment request is marked:
+
+```text
+completed
+```
 
 ### QR scope clarification
 
-The current UI exposes the **reference and signature**, but does not render a graphical QR image.  
-The current implementation should therefore be described as a **signed QR-ready payment request**, rather than a complete visual QR-code generation/scanning subsystem.
+The current UI exposes a signed **reference + signature** but does not create a graphical QR image and does not perform camera-based QR scanning.
+
+The current feature should therefore be described as:
+
+> **signed QR-ready payment request flow**
+
+rather than a complete graphical QR generation and scanning subsystem.
 
 ---
 
-## 12. QR secret configuration
+## 16. QR secret configuration
 
 `QrSignatureService` requires:
 
@@ -439,7 +788,11 @@ The current implementation should therefore be described as a **signed QR-ready 
 AURAPAY_QR_SECRET=<secret-value>
 ```
 
-This value is currently required by the code but is not present in the supplied `.env.example`.
+The variable name is already present in the supplied:
+
+```text
+.env.example
+```
 
 Generate a development secret, for example:
 
@@ -447,29 +800,21 @@ Generate a development secret, for example:
 php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
 ```
 
-Then add the generated value to `.env`:
+Add the generated value only to the real `.env` file:
 
 ```env
-AURAPAY_QR_SECRET=your_generated_secret
-```
-
-For repository hygiene, also add the variable name with an empty value to `.env.example`:
-
-```env
-AURAPAY_QR_SECRET=
+AURAPAY_QR_SECRET=<generated-value>
 ```
 
 Never commit the real secret.
 
 ---
 
-## 13. Rule-based risk scoring
+## 17. Rule-based risk scoring
 
-`RiskScoringService` implements transparent prototype rules.
+`RiskScoringService` implements transparent and deterministic prototype rules.
 
-### Current rules
-
-| Rule | Score |
+| Rule | Risk score |
 |---|---:|
 | Amount >= 1000 | +30 |
 | Amount > 3x sender's recent completed-payment average | +25 |
@@ -477,17 +822,27 @@ Never commit the real secret.
 | QR payment | +10 |
 | Transaction between 00:00 and 05:00 | +10 |
 
-The final score is capped at **100**.
+The final score is capped at:
+
+```text
+100
+```
 
 ### Risk levels
 
 ```text
-0-29   low
-30-59  medium
-60-100 high
+0-29    low
+30-59   medium
+60-100  high
 ```
 
-A high-risk transaction is marked:
+When the result is:
+
+```text
+high
+```
+
+the transaction is marked:
 
 ```text
 flagged
@@ -495,13 +850,13 @@ flagged
 
 and the wallet transfer is not executed.
 
-This model is deliberately explainable and deterministic. It is not a production fraud-detection or machine-learning model.
+This is an explainable academic rule set and is **not** a production fraud-detection or machine-learning model.
 
 ---
 
-## 14. Transaction consistency
+## 18. Transaction consistency and wallet locking
 
-`TransactionService` executes payment processing inside a database transaction.
+`TransactionService` performs payment processing inside a database transaction.
 
 `WalletService` uses:
 
@@ -509,33 +864,47 @@ This model is deliberately explainable and deterministic. It is not a production
 lockForUpdate()
 ```
 
-when debiting or crediting wallet rows.
+when modifying wallet rows.
 
-The intended result is an all-or-nothing transfer:
+The design target is:
 
 ```text
 debit sender
 +
 credit receiver
 =
-single atomic operation
+one atomic transfer
 ```
 
-If the sender has insufficient funds, an `InsufficientFundsException` is raised and the database transaction is rolled back.
+If the sender has insufficient simulated funds, an:
+
+```text
+InsufficientFundsException
+```
+
+is raised and the financial database transaction is rolled back.
 
 ---
 
-## 15. Audit trail and notifications
+## 19. Audit trail, persistence, and current integrity boundary
 
-Audit records currently include:
+AuraPay records audit events through:
 
-- transaction reference through the relationship;
+```text
+AuditService
+AuditLog
+```
+
+An audit record can contain:
+
+- related transaction ID;
 - actor user ID;
 - action;
 - description;
-- structured context.
+- structured context;
+- timestamps.
 
-Current transaction audit actions include:
+Transaction-related audit actions include:
 
 ```text
 transaction.completed
@@ -543,14 +912,60 @@ transaction.flagged
 transaction.failed
 ```
 
-Database notifications are generated for:
+### Persistent failed-payment evidence
+
+For A2A insufficient-funds failures, the current implementation catches the exception **outside** the rolled-back payment database transaction and writes a separate:
+
+```text
+transaction.failed
+```
+
+audit event.
+
+This prevents the failure evidence itself from being rolled back together with the failed financial operation.
+
+The failure context currently contains:
+
+- failure reason;
+- receiver wallet ID;
+- amount;
+- correlation ID.
+
+### Audit access
+
+Audit logs are exposed through a read endpoint protected by the `admin` role.
+
+There is no public API route for editing or deleting audit records.
+
+### Audit integrity clarification
+
+The current snapshot does **not** implement:
+
+- a cryptographic hash chain between audit records;
+- digital signatures over audit records;
+- WORM / immutable external audit storage;
+- a database uniqueness constraint for every audit event.
+
+Therefore, the current audit trail should be described as **application-generated, relationally traceable, role-protected, and persistent for the covered failure scenario**, but **not as cryptographically tamper-evident or immutable**.
+
+### Correlation note
+
+A2A correlation IDs are stored in transaction metadata and in the completed/failed audit contexts.
+
+For high-risk `transaction.flagged` records, the current source should be rechecked before claiming that the correlation ID is present in the audit `context` itself; the transaction still carries its correlation ID in `metadata`.
+
+---
+
+## 20. Notifications and data minimization
+
+AuraPay creates database notifications for:
 
 ```text
 transaction.completed
 transaction.flagged
 ```
 
-The notification payload is deliberately minimal:
+The stored notification payload is deliberately minimal:
 
 ```text
 transaction_id
@@ -558,17 +973,24 @@ status
 risk_level
 ```
 
-It does not include amount or counterparty details.
+It does not include:
 
-### Audit limitation
+- payment amount;
+- counterparty name;
+- bank credentials;
+- authentication secrets.
 
-Because payment processing is wrapped in a database transaction and an insufficient-funds exception is re-thrown, failed-operation records created inside the same transaction may be rolled back together with the failed payment. Persistent audit evidence for failed transfers should therefore be reviewed if the thesis requires every failed attempt to remain recorded.
+No notification is currently generated for:
+
+```text
+transaction.failed
+```
 
 ---
 
-## 16. Data model
+## 21. Data model
 
-Main domain tables:
+Main domain and infrastructure tables include:
 
 ```text
 users
@@ -582,7 +1004,7 @@ passkeys
 sessions
 ```
 
-### Key relationships
+### Main relationships
 
 ```text
 User
@@ -613,28 +1035,76 @@ The prototype does not require real:
 
 ---
 
-## 17. API endpoints
+## 22. API endpoints
 
-All endpoints below require an authenticated Laravel session.
+All AuraPay endpoints in the API group require an authenticated Laravel session and are subject to the five-minute idle timeout, API gateway checks, and API rate limiting.
 
 | Method | Endpoint | Additional control |
 |---|---|---|
-| GET | `/api/wallets/{wallet}` | wallet ownership |
-| POST | `/api/wallets/{wallet}/top-up` | wallet ownership |
-| GET | `/api/transactions` | authenticated user's wallet |
+| GET | `/api/wallets/{wallet}` | `account_info` consent + wallet ownership |
+| POST | `/api/wallets/{wallet}/top-up` | wallet ownership; simulated operation |
+| GET | `/api/transactions` | `account_info` consent |
 | GET | `/api/admin/audit-logs` | admin role |
 | GET | `/api/consents` | authenticated user |
-| POST | `/api/consents` | validated scope |
+| POST | `/api/consents` | validated consent scope |
 | DELETE | `/api/consents/{consent}` | consent ownership |
-| POST | `/api/vop/check` | validated receiver |
-| GET | `/api/qr/{reference}?signature=...` | valid signature + active request |
-| POST | `/api/transactions/a2a` | `payment_initiation` consent + idempotency + exact VoP |
+| POST | `/api/vop/check` | receiver/name/amount validation; returns confirmation token on exact match |
+| GET | `/api/qr/{reference}?signature=...` | valid signature + active, unexpired request |
+| POST | `/api/transactions/a2a` | `payment_initiation` consent + idempotency + correlation ID + VoP + confirmation token |
 | POST | `/api/qr` | `payment_initiation` consent |
 | POST | `/api/qr/{reference}/pay` | `payment_initiation` consent + valid signature |
 
 ---
 
-## 18. Local installation
+## 23. Automated security tests present in the repository
+
+The current:
+
+```text
+tests/Feature/SecurityControlsTest.php
+```
+
+contains tests for:
+
+- denial of access to another user's wallet;
+- payment rejection without `payment_initiation` consent;
+- A2A duplicate prevention through idempotency;
+- exact VoP success and confirmation-token issuance;
+- invalid QR signature rejection;
+- denial of audit-log access to non-admin users;
+- successful audit-log access for admins;
+- API rate limiting;
+- mandatory `account_info` consent;
+- expired `account_info` consent rejection;
+- rejection when confirmed payment parameters are changed;
+- persistent audit evidence after an insufficient-funds payment failure;
+- logout after more than five minutes of inactivity;
+- session validity before five minutes;
+- expiry at the five-minute boundary.
+
+Run the full suite in the project environment:
+
+```bash
+php artisan test
+```
+
+or:
+
+```bash
+composer test
+```
+
+Useful additional checks:
+
+```bash
+php artisan route:list
+php artisan migrate:status
+composer audit
+```
+
+---
+
+## 24. Local installation
 
 ### Requirements
 
@@ -643,36 +1113,44 @@ All endpoints below require an authenticated Laravel session.
 - Node.js and npm;
 - SQLite or another Laravel-supported relational database.
 
-### Clone and install
+### Clone the repository
 
 ```bash
 git clone https://github.com/VickyT0/AuraPay_.git
 cd AuraPay_
+```
 
+### Install dependencies
+
+```bash
 composer install
 npm install
 ```
 
-Create the environment file:
+### Create the environment file
 
 ```bash
 cp .env.example .env
 php artisan key:generate
 ```
 
-For local SQLite:
+### SQLite configuration
+
+The demo is designed to work with SQLite:
 
 ```env
 DB_CONNECTION=sqlite
 ```
 
-Create the database if necessary:
+If required:
 
 ```bash
 touch database/database.sqlite
 ```
 
-Generate and configure a QR signing secret:
+### Configure QR signing
+
+Generate a secret:
 
 ```bash
 php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
@@ -684,25 +1162,25 @@ Add it to `.env`:
 AURAPAY_QR_SECRET=<generated-value>
 ```
 
-Run migrations:
+### Run migrations
 
 ```bash
 php artisan migrate
 ```
 
-Optional demo data:
+Optional demonstration data:
 
 ```bash
 php artisan db:seed
 ```
 
-Build frontend assets:
+### Build frontend assets
 
 ```bash
 npm run build
 ```
 
-Start Laravel:
+### Start Laravel
 
 ```bash
 php artisan serve
@@ -716,141 +1194,132 @@ npm run dev
 
 ---
 
-## 19. Demo users
+## 25. Demonstration users
 
-`DatabaseSeeder` currently defines two synthetic demonstration users.
+`DatabaseSeeder` creates two synthetic demonstration users and corresponding EUR wallets.
 
-Because these credentials are stored in source code, they must be treated as **demo-only** and must never be reused for real systems.
+The seeded credentials are intended only for the local academic prototype.
 
-Alternatively, create a new test user through the registration page.
+For a cleaner demonstration, a new synthetic test user can also be created through the registration flow.
+
+Never reuse demonstration credentials in a real system.
 
 ---
 
-## 20. GitHub Codespaces
+## 26. GitHub Codespaces
 
-AuraPay can be run entirely in GitHub Codespaces.
+AuraPay can be developed and demonstrated entirely in GitHub Codespaces.
 
-For WebAuthn/passkey testing, `APP_URL` must match the HTTPS URL opened in the browser.
+Recommended sequence:
 
-Example:
+```bash
+composer install
+npm install
+php artisan migrate
+npm run build
+php artisan test
+php artisan serve --host=0.0.0.0
+```
+
+Open the forwarded Laravel port through the Codespaces **Ports** panel.
+
+For Passkeys, set:
 
 ```env
-APP_URL=https://<your-codespace-host>.app.github.dev
+APP_URL=https://<actual-forwarded-codespace-host>
 ```
 
-The application contains Codespaces-specific URL handling that forces the configured GitHub development URL to HTTPS.
+then clear cached configuration:
 
-If the Codespace host changes, the WebAuthn relying-party origin also changes, so previously registered passkeys may no longer match the new environment.
+```bash
+php artisan optimize:clear
+```
+
+If the Codespace host changes, the WebAuthn origin / relying-party context changes as well, so a previously registered passkey may no longer match the new development host.
 
 ---
 
-## 21. Running the tests
+## 27. Security-control status matrix
 
-After installing Composer dependencies:
-
-```bash
-php artisan test
-```
-
-You can also use:
-
-```bash
-composer test
-```
-
-The supplied feature test suite includes explicit checks for:
-
-- wallet object-level authorization;
-- mandatory payment consent;
-- A2A idempotency;
-- exact VoP match;
-- rejection of an invalid QR signature;
-- denial of audit-log access to non-admin users;
-- successful audit-log access for admins;
-- API rate limiting.
-
-Useful additional checks:
-
-```bash
-php artisan route:list
-php artisan migrate:status
-composer audit
-```
-
-The supplied PHP source files pass PHP syntax validation in the reviewed archive. The full Laravel test suite should still be executed in the project environment after dependencies are installed.
-
----
-
-## 22. Security controls implemented in code
-
-| Control | Status | Main implementation |
+| Control | Current status | Main implementation / evidence |
 |---|---|---|
-| Authenticated API access | Implemented | Laravel session + `auth` |
-| Login rate limiting | Implemented | Fortify limiter |
+| Authenticated API access | Implemented | Fortify + Laravel session + `auth` |
+| Database-backed sessions | Implemented | `sessions` table + session config |
+| 5-minute idle timeout | Implemented | `IdleSessionTimeout` + feature tests |
+| Session invalidation on timeout | Implemented | logout + invalidate + CSRF regeneration |
+| Login rate limiting | Implemented | Fortify `login` limiter |
+| Passkey rate limiting | Implemented | Fortify `passkeys` limiter |
+| Passkey browser login | Implemented in current UI wiring | `passkey-login` + `aurapay.js` |
 | API rate limiting | Implemented | `api-gateway` limiter |
 | JSON/content validation | Implemented | `ApiGatewayValidation` |
-| Request-size limit | Implemented | 50 KiB gateway limit |
+| Request-size limit | Implemented | 50 KiB |
 | Wallet object authorization | Implemented | `WalletController` |
-| Admin authorization | Implemented | `EnsureAdmin` |
-| Payment consent | Implemented | `EnsureConsent` |
-| Input validation | Implemented | Laravel request validation |
+| Admin audit-log authorization | Implemented | `EnsureAdmin` |
+| `account_info` consent | Implemented | route middleware + tests |
+| `payment_initiation` consent | Implemented | route middleware + tests |
+| Default consent expiry | Implemented | 30 days |
 | Exact VoP before A2A | Implemented | `VopService` |
-| A2A idempotency | Implemented | controller + DB constraint |
+| Dynamic amount/payee confirmation | Implemented | encrypted 5-minute confirmation token |
+| A2A idempotency | Implemented | controller lookup + DB unique constraint |
+| A2A correlation ID | Implemented | UUID validation + metadata/response |
+| Transaction-reference uniqueness | Implemented | unique UUID column |
 | QR-request integrity | Implemented | HMAC-SHA256 |
 | QR expiry | Implemented | `PaymentRequest::isExpired()` |
 | Risk scoring | Implemented | `RiskScoringService` |
-| High-risk hold | Implemented | `flagged` transaction state |
-| Atomic transfer | Implemented | DB transactions + row locking |
-| Audit for completed/flagged payments | Implemented | `AuditService` |
-| Minimal database notification | Implemented | `TransactionNotification` |
-| Passkey registration | Implemented | Fortify/Passkeys + dashboard JS |
-| Passkey custom login button | Needs small UI fix | missing `id="passkey-login"` |
-| `account_info` consent enforcement | Not currently enforced | scope exists but is not middleware-protected |
-| Signed dynamic confirmation binding amount + payee | Not separately implemented | payment validation/VoP exists, but no confirmation artifact |
-| External bank / production API adapter | Not implemented | internal simulation only |
-| Timeout / circuit-breaker integration | Not implemented | no external-bank integration exists |
+| High-risk hold | Implemented | `flagged` status; no wallet transfer |
+| Atomic wallet transfer | Implemented | DB transactions + row locking |
+| Audit completed transaction | Implemented | `AuditService` |
+| Audit flagged transaction | Implemented | `AuditService` |
+| Persistent insufficient-funds failure audit | Implemented | audit outside rolled-back payment transaction + test |
+| Database notifications | Implemented | completed / flagged |
+| Cryptographic audit-log hash chain | Not implemented | no previous-hash / record-hash fields |
+| Immutable/WORM audit storage | Not implemented | normal relational database storage |
+| Unique constraint per audit event | Not implemented | no audit-event uniqueness migration |
 | Graphical QR generation/scanning | Not implemented | signed QR-ready reference only |
-| Persistent audit of rolled-back failures | Needs review | failed event may roll back with transaction |
+| Production bank / payment API | Not implemented | internal simulation |
+| External-service circuit breaker | Not applicable to current local-only payment adapter | no production external-bank dependency |
 
 ---
 
-## 23. Known prototype limitations
+## 28. Known prototype limitations
 
-The current code should **not** be described as a production-ready payment platform.
+AuraPay should not be described as a production-ready payment platform.
 
-Important boundaries include:
+Current boundaries include:
 
-- A2A transfers occur only between AuraPay's internal test wallets;
-- no real bank or payment-service API is connected;
+- payments occur only between internal synthetic wallets;
+- there is no real bank, PSP, card network, or settlement connection;
 - VoP is a local deterministic simulation;
-- QR requests are signed, but no graphical QR encoding/scanning layer is currently included;
-- `account_info` consent is modeled but not enforced on account-information endpoints;
-- consent expiry is optional in the current implementation;
-- a separate cryptographic confirmation object binding amount and payee is not implemented;
-- external-service resilience mechanisms such as timeout policy and circuit breaker are not yet present because there is no real external-bank adapter;
-- passkey registration is wired, but the custom passkey login button needs the expected HTML ID;
-- automated tests cover selected controls rather than every thesis requirement.
+- QR requests are signed, but no graphical QR generation or camera scanning is implemented;
+- risk scoring is a simple deterministic ruleset;
+- audit logs are not cryptographically chained or stored in immutable external storage;
+- the audit table does not enforce a uniqueness key per logical audit event;
+- correlation-ID propagation is strongest in the current A2A path and is not yet a universal requirement for every API operation;
+- QR payment execution does not currently use the same confirmation-token/idempotency model as A2A;
+- Fortify two-factor functionality is enabled in configuration, but the current custom demo UI is primarily focused on password and Passkey flows;
+- external-service resilience controls such as circuit breakers are not meaningful until a real external adapter exists;
+- automated tests cover selected security controls, not every regulatory or thesis requirement.
 
-These limitations are intentional to document the difference between the **demonstration prototype** and a production financial system.
+These limitations intentionally preserve the distinction between an **academic demonstration prototype** and a production financial system.
 
 ---
 
-## 24. Regulatory and standards context
+## 29. Regulatory and standards context
 
-AuraPay is designed with reference to selected requirements and principles from:
+AuraPay is designed with reference to selected principles and requirements discussed in the thesis, including:
 
-- PSD2 and Strong Customer Authentication concepts;
-- Regulation (EU) 2024/886 and Verification of Payee;
-- GDPR;
-- DORA;
-- Bulgarian payment and AML legislation;
+- PSD2 / strong customer authentication concepts;
+- Verification of Payee requirements and concepts;
+- GDPR data-minimization and privacy-by-design principles;
+- DORA resilience and ICT-risk concepts;
+- Bulgarian payment and AML-related legal context;
 - FIDO2 / WebAuthn;
-- NIST digital identity guidance;
+- NIST digital-identity guidance;
 - OWASP API Security and MASVS;
-- PCI DSS principles;
+- PCI DSS scope-minimization principles;
 - ISO/IEC information-security principles.
 
-These sources are used as **requirements and design inputs**.
+These sources are **requirements and design inputs**.
 
 AuraPay does **not** claim:
 
@@ -858,20 +1327,20 @@ AuraPay does **not** claim:
 - payment-institution licensing;
 - PCI DSS certification;
 - ISO certification;
-- complete PSD2/DORA/GDPR compliance.
+- full PSD2, DORA, GDPR, AML, or other regulatory compliance.
 
-A real deployment would require a separate legal, organizational, contractual, operational, security, and conformity assessment.
+A real deployment would require separate legal, organizational, contractual, operational, security, privacy, and conformity assessments.
 
 ---
 
-## 25. Thesis traceability
+## 30. Thesis traceability
 
-The project is intended to support traceability from requirement to evidence:
+The prototype supports traceability in the form:
 
 ```text
 Requirement
     ↓
-Risk / threat
+Threat / risk
     ↓
 Control
     ↓
@@ -886,23 +1355,28 @@ Examples:
 
 | Requirement area | Code control | Existing verification |
 |---|---|---|
-| Object authorization | wallet ownership check | wallet BOLA feature test |
-| Payment consent | `EnsureConsent` | missing-consent feature test |
-| Duplicate protection | idempotency key + DB uniqueness | duplicate-payment feature test |
-| Recipient verification | `VopService` | exact-match feature test |
-| QR integrity | HMAC signature | invalid-signature feature test |
-| Least privilege | `EnsureAdmin` | admin/non-admin tests |
+| Object authorization | wallet ownership check | BOLA-style wallet test |
+| Account-information consent | `EnsureConsent` | required + expired consent tests |
+| Payment consent | `EnsureConsent` | missing-payment-consent test |
+| Duplicate protection | idempotency key + DB uniqueness | duplicate-payment test |
+| Recipient verification | `VopService` | exact-match test |
+| Amount/payee confirmation | encrypted confirmation token | changed-parameter rejection test |
+| Request traceability | `X-Correlation-ID` | transaction metadata / response / audit context |
+| QR integrity | HMAC signature | invalid-signature test |
+| Least privilege | `EnsureAdmin` | admin / non-admin tests |
 | API abuse protection | rate limiter | 61-request rate-limit test |
+| Failed-operation auditability | separate persistent failure audit | persistent-audit test |
+| Session inactivity | 5-minute idle middleware | before/at/after timeout tests |
 
-This mapping provides a foundation for the formal traceability matrix used in the Master's thesis.
+This mapping provides a practical foundation for the formal requirements and traceability matrices in the Master's thesis.
 
 ---
 
-## 26. Repository hygiene
+## 31. Repository hygiene
 
-Do not commit runtime secrets or local-development artifacts.
+Do not commit runtime secrets or disposable local artifacts.
 
-At minimum exclude:
+At minimum, exclude:
 
 ```text
 .env
@@ -913,29 +1387,59 @@ storage/logs/*.log
 .phpunit.result.cache
 ```
 
-The reviewed archive contains local runtime artifacts such as the SQLite database, Laravel log, and PHPUnit cache. These are useful for a local snapshot but should normally not be committed to a public source repository.
+The reviewed snapshot contains local runtime artifacts such as:
+
+```text
+database/database.sqlite
+storage/logs/laravel.log
+.phpunit.result.cache
+```
+
+These may be useful in a private backup but should normally not be committed to a public repository.
+
+The reviewed snapshot does not contain a root `.gitignore`. Before publishing or cleaning the repository, add or restore an appropriate Laravel `.gitignore`.
+
+The following files/directories are documentation or older snapshots rather than runtime dependencies:
+
+```text
+AGENTS.md
+RM-OLD.md
+aurapay-complete/
+```
+
+Remove them only if they are no longer useful for project history or documentation.
 
 ---
 
-## 27. Academic purpose
+## 32. Academic purpose
 
 AuraPay is an engineering and research artifact.
 
-Its purpose is to demonstrate that requirements derived from the analysis of mobile-payment systems can be transformed into:
+Its purpose is to demonstrate how requirements derived from the analysis of mobile-payment systems can be transformed into:
 
 - a defined system boundary;
-- an executable software architecture;
+- executable software architecture;
 - explicit security controls;
+- consent and authentication mechanisms;
+- transaction-integrity controls;
 - a threat and risk model;
 - testable acceptance criteria;
 - repeatable test scenarios;
 - traceable technical evidence.
 
-The project prioritizes **testability, traceability, explainable controls, security-by-design, and explicit scope limitations** over production-scale payment integration.
+The project prioritizes:
+
+- security-by-design;
+- testability;
+- traceability;
+- explicit control behavior;
+- explainable risk rules;
+- clear separation between implemented controls and prototype limitations.
 
 ---
 
 ## Repository
 
 **Project:** AuraPay — Cloud-Based Mobile Payment Application Prototype  
-**Repository:** `VickyT0/AuraPay_`
+**Repository:** `VickyT0/AuraPay_`  
+**Purpose:** Master's thesis demonstration prototype
