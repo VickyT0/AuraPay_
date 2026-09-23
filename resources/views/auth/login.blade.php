@@ -73,6 +73,20 @@
                 <span class="text-en">Login with Passkey</span>
             </button>
         </form>
+
+    <div class="mt-6 text-center text-sm text-gray-600">
+    <span class="text-bg">Нямате демонстрационен профил?</span>
+    <span class="text-en">Don't have a demonstration account?</span>
+
+    <a 
+        href="/register" 
+        class="ml-1 font-semibold text-blue-600 hover:text-blue-700"
+    >
+        <span class="text-bg">Регистрация</span>
+        <span class="text-en">Register</span>
+    </a>
+</div>
+
     </div>
 
     <script>
