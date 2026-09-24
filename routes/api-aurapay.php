@@ -55,7 +55,5 @@ Route::post('/wallets/{wallet}/top-up', [WalletController::class, 'topUp']);
         Route::post('/qr', [QrPaymentController::class, 'store']);
         Route::post('/qr/{reference}/pay', [QrPaymentController::class, 'pay']);
     });
-    Route::get('/throttle-test', function () {
-    return response()->json(['status' => 'success']);
-})->middleware('throttle:5,1');
+
 });

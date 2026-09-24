@@ -9,6 +9,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 use App\Services\PaymentConfirmationService;
 use Illuminate\Support\Str;
+use App\Models\Transaction;
 
 class SecurityControlsTest extends TestCase
 {
@@ -748,6 +749,189 @@ public function test_session_expires_at_exactly_five_minutes_of_inactivity(): vo
         ]);
 
     $this->assertGuest();
+}
+
+public function test_high_risk_payment_does_not_transfer_wallet_balance(): void
+{
+    /*
+     * Sender has sufficient balance.
+     * Therefore a blocked transfer must be caused
+     * by risk controls, not insufficient funds.
+     */
+    [$sender, $senderWallet] =
+        $this->createUserWithWallet(
+            'High Risk Sender',
+            'high-risk-sender@example.test',
+            5000
+        );
+
+    [$receiver, $receiverWallet] =
+        $this->createUserWithWallet(
+            'High Risk Receiver',
+            'high-risk-receiver@example.test',
+            100
+        );
+
+    $this->grantPaymentConsent(
+        $sender
+    );
+
+    /*
+     * Create five recent completed transactions
+     * with a low average amount.
+     *
+     * This makes the next payment trigger:
+     *
+     * +30 high amount
+     * +25 amount > 3x recent average
+     * +25 transaction velocity
+     *
+     * Total >= 60 => HIGH risk.
+     */
+    for ($i = 1; $i <= 5; $i++) {
+
+        Transaction::create([
+            'reference'
+                => (string) Str::uuid(),
+
+            'sender_wallet_id'
+                => $senderWallet->id,
+
+            'receiver_wallet_id'
+                => $receiverWallet->id,
+
+            'amount'
+                => 100.00,
+
+            'type'
+                => 'a2a',
+
+            'status'
+                => 'completed',
+
+            'risk_score'
+                => 0,
+
+            'risk_level'
+                => 'low',
+
+            'metadata'
+                => [
+                    'fixture'
+                        => 'risk-test-history',
+                ],
+        ]);
+    }
+
+    /*
+     * Confirmation is valid for the exact
+     * high-risk payment parameters.
+     */
+    $confirmationToken =
+        app(
+            PaymentConfirmationService::class
+        )->create(
+            $sender,
+            $receiverWallet,
+            1500.00
+        );
+
+    $correlationId =
+        (string) Str::uuid();
+
+    /*
+     * Attempt high-risk A2A transfer.
+     */
+    $response =
+        $this
+            ->actingAs($sender)
+            ->withHeaders([
+                'Idempotency-Key'
+                    => 'high-risk-transfer-test',
+
+                'X-Correlation-ID'
+                    => $correlationId,
+            ])
+            ->postJson(
+                '/api/transactions/a2a',
+                [
+                    'receiver_wallet_id'
+                        => $receiverWallet->id,
+
+                    'receiver_name'
+                        => $receiver->name,
+
+                    'amount'
+                        => 1500.00,
+
+                    'confirmation_token'
+                        => $confirmationToken,
+                ]
+            );
+
+    /*
+     * High-risk operation is accepted for
+     * review, not financially executed.
+     */
+    $response
+        ->assertStatus(202)
+        ->assertJson([
+            'status'
+                => 'flagged',
+
+            'risk_level'
+                => 'high',
+        ]);
+
+    /*
+     * Reload balances from the database.
+     */
+    $senderWallet->refresh();
+    $receiverWallet->refresh();
+
+    /*
+     * No financial transfer may have occurred.
+     */
+    $this->assertSame(
+        '5000.00',
+        number_format(
+            (float) $senderWallet->balance,
+            2,
+            '.',
+            ''
+        )
+    );
+
+    $this->assertSame(
+        '100.00',
+        number_format(
+            (float) $receiverWallet->balance,
+            2,
+            '.',
+            ''
+        )
+    );
+
+    /*
+     * Transaction exists only as a flagged
+     * record for review.
+     */
+    $this->assertDatabaseHas(
+        'transactions',
+        [
+            'sender_wallet_id'
+                => $senderWallet->id,
+
+            'receiver_wallet_id'
+                => $receiverWallet->id,
+
+            'status'
+                => 'flagged',
+
+            'risk_level'
+                => 'high',
+        ]
+    );
 }
 
 }
